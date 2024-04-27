@@ -18,6 +18,7 @@
 #include <QDebug>
 #include <QStyleFactory>
 #include <QTranslator>
+#include <QCommandLineParser>
 
 int main(int argc, char *argv[])
 {

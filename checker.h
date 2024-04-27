@@ -24,7 +24,7 @@ class Checker : public QObject
 public:
 	Checker(const QString &tasksPath);
 
-	void revieweTasks(const QFileInfoList &qrsInfos, const QFileInfoList &fieldsInfos, const QHash<QString
+	void reviewTasks(const QFileInfoList &qrsInfos, const QFileInfoList &fieldsInfos, const QHash<QString
 					  , QVariant> &options);
 	struct Task {
 		QFileInfo qrs;
@@ -38,25 +38,23 @@ public:
 		QString task;
 		QString error;
 		QString time;
+		bool operator <(const TaskReport& other) const { return task < other.task; }
 	};
 
 private:
-	static bool compareReportsByTask(const TaskReport &first, const TaskReport &second)
-	{
-		return first.task < second.task;
-	}
+	typedef QList<TaskReport> task_results_t;
 
-	static void reduceFunction(QHash<QString, QList<TaskReport>> &result, const QList<TaskReport> &intermediate);
+	static void reduceFunction(QHash<QString, task_results_t> &result, const task_results_t &intermediate);
 
-	static QList<TaskReport> checkTask(const Task *task);
+	static task_results_t checkTask(const Task *task);
 
-	static QString startProcess(const QString &program, const QStringList &options);
+	static QString executeProcess(const QString &program, const QStringList &options);
 
-	void createHtmlReport(QHash<QString, QList<TaskReport>> &result);
+	void createHtmlReport(const QHash<QString, QList<TaskReport> > &result);
 
 	const QStringList generateRunnerOptions(const QHash<QString, QVariant> &options);
 
-	const QStringList generatePathcerOptions(const QHash<QString, QVariant> &options);
+	const QStringList generatePatcherOptions(const QHash<QString, QVariant> &options);
 
 	static bool isErrorMessage(const QString &message);
 

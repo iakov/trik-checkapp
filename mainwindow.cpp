@@ -65,7 +65,7 @@ void MainWindow::on_runCheckButton_clicked()
 	}
 
 	Checker checker(mTasksPath);
-	checker.revieweTasks(qrsList, fields, mDirOptions[mTasksPath]);
+	checker.reviewTasks(qrsList, fields, mDirOptions[mTasksPath]);
 }
 
 void MainWindow::on_chooseField_clicked()

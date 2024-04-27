@@ -30,15 +30,11 @@ Checker::Checker(const QString &tasksPath)
 {
 }
 
-void Checker::revieweTasks(const QFileInfoList &qrsInfos, const QFileInfoList &fieldsInfos, const QHash<QString, QVariant> &options)
+void Checker::reviewTasks(const QFileInfoList &qrsInfos, const QFileInfoList &fieldsInfos, const QHash<QString, QVariant> &options)
 {
-	auto patcherOptions = generatePathcerOptions(options);
+	auto patcherOptions = generatePatcherOptions(options);
 	auto runnerOptions = generateRunnerOptions(options);
 
-	QList<Task *> tasksList;
-	for (auto &&qrs : qrsInfos) {
-		tasksList += new Task({qrs, fieldsInfos, patcherOptions, runnerOptions});
-	}
 
 	QProgressDialog dialog;
 	dialog.setCancelButtonText(tr("Cancel"));
@@ -57,14 +53,22 @@ void Checker::revieweTasks(const QFileInfoList &qrsInfos, const QFileInfoList &f
 			this, [this, &dialog, &watcher](){
 		dialog.setLabelText(tr("Creating a report"));
 		if (!watcher.isCanceled()) {
-			auto result = watcher.result();
-			this->createHtmlReport(result);
+			auto r = watcher.result();
+			for (auto &x: r.keys()) {
+				std::sort(r[x].begin(), r[x].end());
+			}
+			createHtmlReport(r);
 		}
 		dialog.reset();
 	});
 
 	if (!options[backgroundOption].toBool()) {
 		QThreadPool::globalInstance()->setMaxThreadCount(MAX_VISIBLE_THREADS);
+	}
+
+	QList<Task *> tasksList;
+	for (auto &&qrs : qrsInfos) {
+		tasksList += new Task({qrs, fieldsInfos, patcherOptions, runnerOptions});
 	}
 
 	auto futureTasks = QtConcurrent::mappedReduced(tasksList, checkTask, reduceFunction);
@@ -75,41 +79,44 @@ void Checker::revieweTasks(const QFileInfoList &qrsInfos, const QFileInfoList &f
 		watcher.waitForFinished();
 	}
 
-	for(auto &&t : tasksList) {
-		delete t;
-	}
+	qDeleteAll(tasksList);
 }
 
-QList<Checker::TaskReport> Checker::checkTask(const Checker::Task *t)
+Checker::task_results_t Checker::checkTask(const Checker::Task *t)
 {
-	QList<TaskReport> result;
 	QString ext = "";
 	if (QOperatingSystemVersion::currentType() == QOperatingSystemVersion::Windows) {
 		ext = ".exe";
 	}
 
+	task_results_t result;
 	for (auto &&f : t->fieldsInfos) {
 		QDir(t->qrs.absoluteDir().absolutePath()).mkdir("tmp");
 		const QString patchedQrsName = t->qrs.absoluteDir().absolutePath() + "/tmp/" + t->qrs.fileName();
 		QFile(t->qrs.absoluteFilePath()).copy(patchedQrsName);
 		QFile patchedQrs(patchedQrsName);
 
-		startProcess("patcher" + ext, QStringList(patchedQrs.fileName()) + t->patcherOptions + QStringList(f.absoluteFilePath()));
-
 		TaskReport report;
 		report.name = t->qrs.fileName();
 		report.task = f.fileName();
-		report.error = startProcess("2D-model" + ext, QStringList(patchedQrs.fileName()) + t->runnerOptions);
 		report.time = "-";
+		report.error = executeProcess("./patcher" + ext
+									  , QStringList(patchedQrs.fileName()) + t->patcherOptions << f.absoluteFilePath());
 
 		if (!isErrorMessage(report.error)) {
-			int start = report.error.indexOf(tr("in")) + 3;
-			int end = report.error.indexOf(tr("sec!")) - 1;
-			if (start - 3 != -1 && end + 1 != -1) {
-				report.time = report.error.mid(start, end - start);
+			report.error = executeProcess("./2D-model" + ext, QStringList(patchedQrs.fileName()) + t->runnerOptions);
+			if (!isErrorMessage(report.error)) {
+				int start = report.error.indexOf(tr("in")) + 3;
+				int end = report.error.indexOf(tr("sec!")) - 1;
+				if (start - 3 != -1 && end + 1 != -1) {
+					report.time = report.error.mid(start, end - start);
+				}
+			} else {
+				qDebug() << "Failed to run 2D-model:" << report.error;
 			}
+		} else {
+			qDebug() << "Failed to patch:" << report.error;
 		}
-
 		result.append(report);
 	}
 	QDir(t->qrs.absoluteDir().absolutePath() + "/tmp/").removeRecursively();
@@ -117,51 +124,60 @@ QList<Checker::TaskReport> Checker::checkTask(const Checker::Task *t)
 	return result;
 }
 
-void Checker::reduceFunction(QHash<QString, QList<TaskReport>> &result, const QList<TaskReport> &intermediate)
+void Checker::reduceFunction(QHash<QString, Checker::task_results_t> &result, const Checker::task_results_t &intermediate)
 {
 	for (auto i : intermediate) {
 		result[i.name].append(i);
 	}
 }
 
-QString Checker::startProcess(const QString &program, const QStringList &options)
+QString Checker::executeProcess(const QString &program, const QStringList &options)
 {
-	QProcess proccess;
-	proccess.start(program, options);
-	if (!proccess.waitForStarted()) {
-		return "Error: not started";
-	}
+	QProcess process;
+	QEventLoop l;
 
-	if (options.contains("-b") && !proccess.waitForFinished(BACKGROUND_TIMELIMIT)) {
-		return "Error: not finished";
+	connect(&process, QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished)
+			, &l, [&l](int exitCode, QProcess::ExitStatus exitStatus) {
+		//qDebug() << process << exitCode << exitStatus;
+		Q_UNUSED(exitCode)
+		Q_UNUSED(exitStatus)
+		l.exit();
+	});
+	connect(&process, &QProcess::errorOccurred, &l, [&](QProcess::ProcessError processError) {
+		qDebug() << "ERROR" << processError << program << options;
+		l.exit(-1);
+	});
+	if (options.contains("-b")) {
+		QTimer::singleShot(BACKGROUND_TIMELIMIT, Qt::TimerType::CoarseTimer, &l, [&](){
+			qDebug() << "ERROR TIMEOUT" << program << options;
+			l.exit(-2);
+		});
 	}
-	else {
-		proccess.waitForFinished(-1);
+	process.start(program, options);
+	auto rc = l.exec();
+	switch (rc) {
+		case -1: return "Error: not started";
+		case -2: return "Error: not finished";
+		default: return process.readAllStandardError();
 	}
-
-	return proccess.readAllStandardError();
 }
 
-void Checker::createHtmlReport(QHash<QString, QList<TaskReport>> &result)
+void Checker::createHtmlReport(const QHash<QString, QList<TaskReport>> &result)
 {
 	auto qrsNames = result.keys();
-	auto numberOfCorrect = new int[qrsNames.length()] {0};
+	int numberOfCorrect [qrsNames.length()];
 	std::sort(qrsNames.begin(), qrsNames.end());
 
 	int i = 0;
 	for (auto &&key : qrsNames) {
-		std::sort(result[key].begin(), result[key].end(), compareReportsByTask);
-		foreach (auto r, result[key]) {
-			numberOfCorrect[i] += isErrorMessage(r.error) ? 0 : 1;
+		for(auto &&r: result[key]) {
+			numberOfCorrect[i] += !isErrorMessage(r.error);
 		}
 		i++;
 	}
 
-	QFile reportFile(mTasksPath + QDir::separator() + "report.html");
-	QFile htmlBegin(":/report_begin.html");
-	QFile htmlEnd(":/report_end.html");
-
-	QString body = reportHeader.arg(mTasksPath.section(QDir::separator(), -1)).arg(QDateTime::currentDateTime().toString("hh:mm dd.MM.yyyy"));
+	QString body = reportHeader.arg(mTasksPath.section(QDir::separator(), -1))
+			.arg(QDateTime::currentDateTime().toString("hh:mm dd.MM.yyyy"));
 
 	i = 0;
 	for (auto &&key : qrsNames) {
@@ -192,23 +208,27 @@ void Checker::createHtmlReport(QHash<QString, QList<TaskReport>> &result)
 		i++;
 	}
 
+	QFile htmlBegin(":/report_begin.html");
 	htmlBegin.open(QFile::ReadOnly);
 	QString report = htmlBegin.readAll();
 	htmlBegin.close();
 
 	report += body;
 
+	QFile htmlEnd(":/report_end.html");
 	htmlEnd.open(QFile::ReadOnly);
 	report += htmlEnd.readAll();
 	htmlEnd.close();
 
-	std::string html = report.toStdString();
-	const auto raw = html.c_str();
-	reportFile.open(QIODevice::WriteOnly | QIODevice::Truncate);
-	reportFile.write(raw);
+	QFileInfo reportFileInfo(mTasksPath + QDir::separator() + "report.html");
+	QFile reportFile(reportFileInfo.canonicalFilePath());
+	if(reportFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+		qDebug() << "Failed to open" << reportFileInfo.canonicalFilePath() << "with" << reportFile.errorString();
+	}
+	if (reportFile.write(report.toUtf8()) < 0) {
+		qDebug() << "Failed to write" << reportFileInfo.canonicalFilePath() << "with" << reportFile.errorString();
+	}
 	reportFile.close();
-
-	delete[] numberOfCorrect;
 }
 
 const QStringList Checker::generateRunnerOptions(const QHash<QString, QVariant> &options)
@@ -226,7 +246,7 @@ const QStringList Checker::generateRunnerOptions(const QHash<QString, QVariant> 
 	return result;
 }
 
-const QStringList Checker::generatePathcerOptions(const QHash<QString, QVariant> &options)
+const QStringList Checker::generatePatcherOptions(const QHash<QString, QVariant> &options)
 {
 	QStringList result;
 	if (options[resetRP].toBool()) {
